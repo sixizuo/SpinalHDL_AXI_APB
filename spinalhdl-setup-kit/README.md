@@ -1,110 +1,150 @@
-# SpinalHDL AXI / APB → Verilog 环境搭建套件
+# SpinalHDL AXI4 / APB3 互连：Verilog 生成与 Vivado 仿真套件
 
-在 Windows 11 上用 WSL2(Ubuntu) + VS Code + sbt + Metals 搭建 SpinalHDL 开发环境，
-把 AXI 与 APB 两套互连代码分别转成 Verilog。
+把「用 SpinalHDL 写总线 → 生成 Verilog → 在 Vivado 里仿真验证」这条链路做成**可重复执行的脚本**：
+WSL 侧负责生成，Windows 侧负责仿真，每条总线一套独立脚本，互不干扰。
 
-**所有脚本都用相对路径**：整套文件下载到哪里都能直接跑，不写死任何盘符。
-**AXI 与 APB 在 WSL 侧是两个完全独立的工程**，各有各的 `build.sbt`、源码目录和产物目录。
+**完整实验步骤见 [`docs/AXI_APB总线互连仿真实验指导.md`](docs/AXI_APB总线互连仿真实验指导.md)**
+（分 4 章：环境 / AXI / APB / 改结构与校验）。本文件只是索引与速查。
 
 ---
 
-## 1. 目录结构
+## 1. 这套东西产出什么
+
+四类 Verilog，**永远不内联**，各自独立成文件：
+
+| 类别 | AXI | APB | 可综合 |
+|---|---|---|---|
+| ① 总线 RTL（可独立交付） | `AxiCrossbar_2x8.v`、`Axi_CDC.v` | `Apb3Crossbar_2x8.v` | 是 |
+| ② 主设备行为模型 | `AxiMasterModel.v` | `ApbMasterModel.v` | 是 |
+| ③ 从设备行为模型 | `AxiSlaveModel.v` | `ApbSlaveModel.v` | 是 |
+| ④ 仿真顶层（手写） | `tb_axi_top.v` | `tb_apb_top.v` | 否 |
+
+拆分带来的直接收益：
+
+* 总线 RTL 不含 testbench 内容，可以单独拿去综合 / 交付；
+* 模型不 `import` 互连，只按 AXI4 / APB3 端口说话 —— 换一个互连实现，模型照样能用；
+* 每个 `.v` 只有一个模块，波形层次干净，改一个模型不牵动另一个；
+* 激励参数（`base / stride / seed / id`）做成**输入端口**，改地址段不必重新生成 Verilog。
+
+## 2. 目录结构
 
 ```
-<任意位置>/SpinalHDL/                              ← 仓库根（下载解压出来的目录）
-    ├── AXIcrossbar/                               ← AXI 源码
-    │       Axicrossbar.scala   fifo.scala   Config.scala
-    ├── apb/                                       ← APB 源码
-    │       Apbcrossbar.scala   ApbSim.scala   Config.scala
-    └── spinalhdl-setup-kit/
-        ├── README.md                              ← 本文件
-        ├── SpinalHDL_AXI_APB_转Verilog_环境搭建教程.docx
-        │                                          ← 从零开始的图文步骤教程（先看它）
-        ├── windows/
-        │   └── 00-windows-preflight.ps1           ← Windows 前置检查（只读）
-        └── scripts/
-            ├── lib/common.sh                      ← 路径推导与输出函数（各脚本共用）
-            ├── 01-install-toolchain.sh            ← 工具链：apt 镜像 + JDK17 + sbt + 依赖镜像
-            ├── 02-create-project.sh               ← 建两个独立工程骨架
-            ├── 03-import-source.sh                ← 分别导入两套 .scala 源码
-            ├── 04-doctor.sh                       ← 环境体检（只读）
-            ├── 05-make-verilog.sh                 ← 分别生成 Verilog 并回传
-            └── 06-vscode-extensions.sh            ← 安装 VS Code 扩展
+<仓库根>/
+├── AXIcrossbar/                   AXI 源码与产物
+│   ├── Axicrossbar.scala          被测互连（2 主 8 从，ID 4→5 位）
+│   ├── fifo.scala                 配套 FIFO
+│   ├── Config.scala               Verilog 输出目录 / 时钟复位风格
+│   ├── sim/AxiModels.scala        主/从模型（与互连解耦）
+│   ├── verilog/                   ① 总线 RTL
+│   └── verification/
+│       ├── models/                ② ③ 模型
+│       └── tb_axi_top.v           ④ 手写仿真顶层
+├── apb/                           结构完全相同（Apbcrossbar.scala / sim/ApbModels.scala / …）
+└── spinalhdl-setup-kit/
+    ├── docs/                      实验指导（Markdown）
+    ├── scripts/                   ← WSL 里跑
+    │   ├── lib/common.sh          路径推导 + 总线描述表（加第三条总线只改这里）
+    │   ├── lib/project_kit.sh     建骨架/同步/调 sbt/回传产物
+    │   ├── env/01,02
+    │   ├── axi/10,11,12,13
+    │   └── apb/20,21,22,23
+    ├── windows/                   ← Windows 的 cmd 里跑
+    │   ├── env/00-preflight.ps1
+    │   ├── axi/14-run-sim.cmd / .tcl / 14-wave.tcl
+    │   └── apb/24-run-sim.cmd / .tcl / 24-wave.tcl
+    └── vivado-sim/                仿真工程与结果的落地目录（生成物，可删）
 ```
 
-## 2. 路径约定
+## 3. 脚本编号
 
-脚本启动时从 **`scripts/lib/common.sh` 自身的位置** 往上推导，全部相对：
+环境脚本独立号段，每条总线独立号段；同号段内后缀含义一致。
 
-| 用途 | 推导方式 | 默认落点 |
+| 编号 | 作用 | 在哪跑 |
 |---|---|---|
-| 仓库根 `REPO_DIR` | 套件目录的上一级 | 随下载位置走 |
-| AXI 源码 `SRC_AXI` | `$REPO_DIR/AXIcrossbar` | 随下载位置走 |
-| APB 源码 `SRC_APB` | `$REPO_DIR/apb` | 随下载位置走 |
-| AXI 工程 `PROJ_AXI` | `$WSL_PROJ_ROOT/AXIcrossbar` | `~/spinalhdl-projects/AXIcrossbar` |
-| APB 工程 `PROJ_APB` | `$WSL_PROJ_ROOT/apb` | `~/spinalhdl-projects/apb` |
-| AXI 产物回传 | `$SRC_AXI/verilog` | 仓库内 |
-| APB 产物回传 | `$SRC_APB/verilog` | 仓库内 |
+| `env/00-preflight.ps1` | Windows 前置检查（只读，不改系统） | Windows PowerShell |
+| `env/01-install-toolchain.sh` | JDK 17 + sbt + 国内镜像 | WSL |
+| `env/02-vscode-extensions.sh` | VS Code 的 Scala / Metals 扩展 | WSL |
+| `axi/10`、`apb/20` | 建**总线** sbt 工程 | WSL |
+| `axi/11`、`apb/21` | 生成**总线 RTL** → `verilog/` | WSL |
+| `axi/12`、`apb/22` | 建**激励** sbt 工程 | WSL |
+| `axi/13`、`apb/23` | 生成**主/从模型** → `verification/models/` | WSL |
+| `axi/14`、`apb/24` | Vivado 建工程 + 挂波形 + 仿真 + 判定 | Windows cmd |
 
-WSL 侧工程刻意放在 `$HOME` 下的 ext4 文件系统里，不放在 `/mnt/d`：
-跨 9p 文件系统编译会明显变慢（04 脚本会检测并提醒）。
-
-**为什么是两个工程**：两份源码里各有一个同名的 `package test / object Config`，
-塞进同一个 sbt 工程会「重复定义」直接编译失败；顶层模块与生成入口也不一样。
-
-## 3. 执行顺序（每个脚本独立运行）
-
-在 **WSL 的 Ubuntu 终端**里执行：
+## 4. 三步跑通
 
 ```bash
-cd <下载位置>/SpinalHDL/spinalhdl-setup-kit
+# ① 环境（只做一次）
+bash scripts/env/01-install-toolchain.sh
+bash scripts/env/02-vscode-extensions.sh
 
-bash scripts/01-install-toolchain.sh
-bash scripts/02-create-project.sh        # 建两个工程
-bash scripts/03-import-source.sh         # 两个工程各自导入源码
-bash scripts/04-doctor.sh
-bash scripts/05-make-verilog.sh          # 两个工程各自生成 Verilog
-bash scripts/06-vscode-extensions.sh
+# ② 生成 Verilog（每条总线四步，随时可单独重跑）
+bash scripts/axi/10-create-bus-project.sh
+bash scripts/axi/11-make-bus-verilog.sh
+bash scripts/axi/12-create-sim-project.sh
+bash scripts/axi/13-make-model-verilog.sh
+
+bash scripts/apb/20-create-bus-project.sh
+bash scripts/apb/21-make-bus-verilog.sh
+bash scripts/apb/22-create-sim-project.sh
+bash scripts/apb/23-make-model-verilog.sh
 ```
 
-每个脚本都能单独重跑（幂等），重复执行不会破坏已有环境。
-全部跑完的效果：两个工程的 `hw/gen` 里各出现自己的 `.v`，
-并回传到 `<下载位置>/SpinalHDL/AXIcrossbar/verilog/` 与 `<下载位置>/SpinalHDL/apb/verilog/`。
+```bat
+:: ③ 回 Windows 的 cmd（不要用 Git Bash）
+windows\axi\14-run-sim.cmd
+windows\apb\24-run-sim.cmd
 
-## 4. 脚本清单
+:: 想看波形
+windows\axi\14-run-sim.cmd gui
+```
 
-| 脚本 | 需要 sudo 密码 | 作用 |
+预期结论：
+
+```
+  verdict : PASS
+  detail  : ==== PASS ==== 2 masters x 8 rounds x 4 beats, all read back identical (218 cycles)   ← AXI
+  detail  : ==== PASS ==== 2 masters x 4 rounds x 8 words,  all read back identical (69 cycles)    ← APB
+```
+
+## 5. 结果落在哪
+
+| 内容 | 路径 |
+|---|---|
+| 判定结果（一个词） | `vivado-sim/<bus>/verdict.txt` — `PASS` / `FAIL` / `NO-VERDICT` |
+| 波形配置 | `vivado-sim/<bus>/tb_*_top.wcfg` |
+| 仿真日志 | `vivado-sim/<bus>/proj/sim_<bus>.sim/sim_1/behav/xsim/simulate.log` |
+| 波形数据库 | 同目录 `tb_*_top.wdb` |
+
+`verdict` 三种值的含义：`PASS` 数据全对；`FAIL` 数据错或超时（`detail` 行会说清哪个主设备）；
+`NO-VERDICT` 仿真没跑到判定点（多半握手死锁或 elaborate 失败，往上翻日志找 `ERROR`）。
+
+## 6. 踩坑清单
+
+按「踩到时的痛感」排序，全部已在脚本里规避，自己改脚本时注意别踩回去。
+
+| 坑 | 现象 | 处理 |
 |---|---|---|
-| `windows/00-windows-preflight.ps1` | 建议管理员 | Windows 侧前置检查，只读；从 `$PSScriptRoot` 推导仓库根 |
-| `scripts/01-install-toolchain.sh` | 是 | apt 镜像 + JDK17 + sbt + sbt/coursier 依赖镜像 |
-| `scripts/02-create-project.sh` | 否 | 建 AXI、APB 两个独立工程骨架 |
-| `scripts/03-import-source.sh` | 否 | 按工程分别导入各自的 `.scala` |
-| `scripts/04-doctor.sh` | 否 | 10 类体检，只读 |
-| `scripts/05-make-verilog.sh` | 否 | 逐工程 bloopInstall → 生成 Verilog → 回传 |
-| `scripts/06-vscode-extensions.sh` | 否 | 在 WSL 侧装 Metals / Scala 扩展 |
+| `.cmd` 写 UTF-8 中文 | `'cl' 不是内部或外部命令`，整行被拆断 | `.cmd` 保持**纯 ASCII + CRLF**（cmd.exe 按 GBK 读） |
+| Git Bash 跑 `.cmd` | 退出码恒 127，判定失效 | 用 cmd；或 `cmd //c`（`/c` 会被 MSYS 改写成 `C:\`） |
+| `sim_1` 没设 top | `Common 17-70 Top module not set for fileset 'sim_1'` | `sources_1` 与 `sim_1` 都要 `set_property top` |
+| `launch_simulation -mode batch` | `Invalid simulation mode` | 2025.2 里 `-mode` 指 behavioral/post-synth/post-impl，别带 |
+| batch 下 `add_wave` | `Wavedata 42-443` | 用 `xsim.simulate.custom_tcl` 注册波形脚本 |
+| 看 xsim 退出码 | `$finish` 后返回 `0xC0000409` | 只认 `simulate.log` 里的 PASS/FAIL |
+| `get_objects` 精确名 | 分组 0 个信号 | 模型端口是 `io_axi_aw_valid`，互连端口是 `axiIn_0_awvalid`，名不同 |
+| `get_objects` 尾部 `*` | 分组信号数暴增（281 vs 35） | `*` 会跨层次，改用显式端口清单 |
+| 多版本 Vivado | `valid license was not found` | `set VIVADO_BIN=<有 license 的>\Vivado\bin\vivado.bat` |
+| `stride` 太小 | `FAIL` 但握手完全正常 | `stride` 必须 ≥ `beats × 4`（APB 是 `words × 4`） |
+| 从模型 `b.id` 硬编码 0 | 主设备 1 永远等不到 B，仿真卡死 | `b.id` 必须回显 `awid` |
+| 打开 `hw/spinal/test` 子目录 | Metals 报 `no build tool detected` | 打开工程根（有 `build.sbt` 的那层） |
 
-## 5. 常用参数
+## 7. 加第三条总线
 
-| 变量 / 参数 | 默认 | 适用脚本 |
-|---|---|---|
-| `--axi` / `--apb` / `--all` | `--all` | 02 / 03 / 04 / 05 / 06：只处理其中一个工程 |
-| `TARGET=axi\|apb\|all` | `all` | 同上（环境变量写法） |
-| `REPO_DIR` | 套件目录的上一级 | 全部：改写仓库根 |
-| `SRC_AXI` / `SRC_APB` | `$REPO_DIR/AXIcrossbar`、`$REPO_DIR/apb` | 03 / 04 / 05 |
-| `WSL_PROJ_ROOT` | `$HOME/spinalhdl-projects` | 02 / 03 / 04 / 05 / 06 |
-| `PROJ_AXI` / `PROJ_APB` | `$WSL_PROJ_ROOT/{AXIcrossbar,apb}` | 02 / 03 / 04 / 05 / 06 |
-| `--no-mirror` | — | 01：不使用国内镜像 |
-| `--apt-mirror=URL` | `https://mirrors.aliyun.com` | 01 |
-| `--sbt-version=X` | `1.10.2` | 01：回退安装 sbt 的版本 |
-| `--force` | — | 03：用源文件覆盖工程内的同名文件 |
-| `--clean` | — | 05：先 `sbt clean` 再全量重建 |
-| `--no-export` | — | 05：不把 `.v` 回传到仓库内 |
+七处改动，其余全不用碰：
 
-## 6. 三个最容易踩的坑
-
-1. **不要用别处的 `build.sbt` 覆盖工程** —— 会冲掉 `Compile / scalaSource`，
-   导致 `hw/spinal` 下的代码编译不进去。
-2. **VS Code 必须打开工程根目录**（`~/spinalhdl-projects/AXIcrossbar` 或 `.../apb`），
-   不要只打开 `hw/spinal/test`，否则 Metals 会退化成 Scala CLI 单文件模式；
-   也不要试图把两个工程放进同一个窗口。
-3. **改完代码要重新生成** —— Verilog 不会自动更新：`Ctrl+Shift+B` 或重跑 05 脚本。
+1. `scripts/lib/common.sh` 的 `load_bus` 里加一个 `case`（`BUS_NUM / BUS_SRC / BUS_* / MODEL_* / TB_*`）；
+2. `scripts/lib/project_kit.sh` 的 `bus_sim_script` 里加一行返回 `xx-run-sim.cmd`；
+3. 新建 `scripts/xx/` 四个脚本（照抄 10~13，改 `load_bus xx`）；
+4. 新建 `windows/xx/` 三个文件（照抄 14，改路径与 top 名）；
+5. 源码目录 `<仓库根>/xx/`；
+6. 手写 `verification/tb_xx_top.v`；
+7. `windows/env/00-preflight.ps1` 的 `$needScripts` / `$needWin` 里加进新文件。

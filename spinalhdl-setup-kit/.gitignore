@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------------------
+#  vivado-sim/ 下全是可再生的构建产物，不进版本库
+#  （仿真工程能一条命令重建：windows\axi\14-run-sim.cmd / windows\apb\24-run-sim.cmd）
+#  但 verdict.txt 与 *.wcfg 保留 —— 一个是判定结论、一个是波形分组配置，都有查考价值
+# ---------------------------------------------------------------------------
+vivado-sim/*/proj/
+vivado-sim/*/*.jou
+vivado-sim/*/*.log
+vivado-sim/*/*.wdb
+vivado-sim/*/*.vcd
+vivado-sim/*/*.pb
+vivado-sim/*/xsim.dir/
+vivado-sim/*/dfx_runtime.txt
+
+# Vivado / xsim 在套件根目录留下的零碎
+/xsim.dir/
+/.Xil/
+*.pb
+*.jou
+*.log
+
+# 生成工程的 sbt 缓存
+**/target/
+**/project/target/
+**/hw/gen/
+
+# Office 打开 docx 时留下的锁文件
+~$*.docx

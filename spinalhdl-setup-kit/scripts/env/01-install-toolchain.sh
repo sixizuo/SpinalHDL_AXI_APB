@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  01-install-toolchain.sh
+#  01-install-toolchain.sh —— 环境准备第一步：在 WSL 里装工具链
 #  在 WSL(Ubuntu) 里安装 SpinalHDL → Verilog 所需的全部工具链
 #
 #  用法（在 WSL 的 Ubuntu 终端里，进入本套件目录后执行）：
 #      cd <套件目录>
-#      bash scripts/01-install-toolchain.sh
+#      bash scripts/env/01-install-toolchain.sh
 #
 #  可选参数：
 #      --no-mirror            不改 apt 源、不写 Maven 镜像（全部走官方源）
@@ -26,7 +26,8 @@
 set -uo pipefail
 
 # 载入共用的路径推导与输出函数（相对本脚本定位，不依赖任何绝对路径）
-. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh" \
+_HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+. "$_HERE/../lib/common.sh" \
   || { echo "缺少 scripts/lib/common.sh，文件不完整" >&2; exit 1; }
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -97,6 +98,12 @@ $SUDO apt-get update || warn "apt-get update 有报错，继续尝试安装"
 $SUDO apt-get install -y git curl wget unzip zip ca-certificates lsb-release \
   || die "基础工具安装失败（可加 --no-mirror 用官方源重试）"
 ok "git / curl / wget / unzip / zip 已就绪"
+
+# 关于 Verilator / iverilog：本套件【都不需要】，所以这里刻意不装。
+#   仿真由 Windows 侧 Vivado 的 xsim 完成（windows/<总线>/14|24-run-sim.cmd），
+#   Verilator 只属于旧的 SpinalSim 路线，且 apt 里的 5.x 与 SpinalHDL 1.10.1 不兼容；
+#   iverilog 在 SpinalHDL 1.10.1 里被官方标注为不可用（"This backend doesn't work"）。
+#   自己另外要用可以装：sudo apt install -y verilator / iverilog
 
 # ---------------------------------------------------------------------------
 step "3/7 安装 JDK 17"
@@ -198,16 +205,29 @@ cat <<EOF
 ================================================================
  工具链安装完成。
 
- 接下来（每条命令都独立，可以随时单独重跑）：
-     bash "$SCRIPTS_DIR/02-create-project.sh"
-     bash "$SCRIPTS_DIR/03-import-source.sh"
-     bash "$SCRIPTS_DIR/04-doctor.sh"
-     bash "$SCRIPTS_DIR/05-make-verilog.sh"
-     bash "$SCRIPTS_DIR/06-vscode-extensions.sh"
+ 接下来按章做（每条命令都独立，可以随时单独重跑）：
 
- 02/03 会建两个互不相干的 WSL 工程：
-     $(tgt_label axi)  ->  $PROJ_AXI
-     $(tgt_label apb)  ->  $PROJ_APB
+   AXI 总线（第 2 章）
+     bash "$SCRIPTS_DIR/axi/10-create-bus-project.sh"    # 建总线 sbt 工程
+     bash "$SCRIPTS_DIR/axi/11-make-bus-verilog.sh"      # 生成互连 RTL
+     bash "$SCRIPTS_DIR/axi/12-create-sim-project.sh"    # 建激励 sbt 工程
+     bash "$SCRIPTS_DIR/axi/13-make-model-verilog.sh"    # 生成主/从模型
+
+   APB 总线（第 3 章）
+     bash "$SCRIPTS_DIR/apb/20-create-bus-project.sh"
+     bash "$SCRIPTS_DIR/apb/21-make-bus-verilog.sh"
+     bash "$SCRIPTS_DIR/apb/22-create-sim-project.sh"
+     bash "$SCRIPTS_DIR/apb/23-make-model-verilog.sh"
+
+ 然后回到 Windows，双击（或 cmd 里执行）：
+     windows\axi\14-run-sim.cmd
+     windows\apb\24-run-sim.cmd
+
+ 四个 WSL 工程的位置：
+     $PROJ_AXI        AXI 总线
+     $PROJ_AXI_SIM    AXI 激励模型
+     $PROJ_APB        APB 总线
+     $PROJ_APB_SIM    APB 激励模型
 
  如果 sbt 是走「回退方案」装的，建议先执行一次：  source ~/.profile
 ================================================================

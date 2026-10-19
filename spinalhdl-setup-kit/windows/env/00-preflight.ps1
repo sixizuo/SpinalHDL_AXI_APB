@@ -1,13 +1,13 @@
-﻿﻿# =============================================================================
-#  00-windows-preflight.ps1
-#  在【裸 Windows 11】上检查是否具备安装 WSL2 + VS Code + SpinalHDL 开发环境的条件
+﻿# =============================================================================
+#  00-preflight.ps1
+#  在【裸 Windows 11】上检查是否具备安装 WSL2 + VS Code + Vivado 仿真环境
 #
 #  用法（在 Windows 上操作）：
 #     1) 开始菜单搜索 PowerShell -> 右键「以管理员身份运行」
 #     2) 进入本文件所在目录后执行（不要写死盘符，路径按你实际解压位置来）：
 #          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-#          cd "<解压位置>\spinalhdl-setup-kit\windows"
-#          .\00-windows-preflight.ps1
+#          cd "<解压位置>\spinalhdl-setup-kit\windows\env"
+#          .\00-preflight.ps1
 #
 #  本脚本【只读检查】，不改动系统任何设置。
 #
@@ -35,13 +35,14 @@ Write-Host "Windows 前置环境检查 —— SpinalHDL / WSL2 / VS Code" -Foreg
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 # -----------------------------------------------------------------------------
-# 路径全部相对推导：本文件在 <仓库根>\spinalhdl-setup-kit\windows\ 下
+# 路径全部相对推导：本文件在 <仓库根>\spinalhdl-setup-kit\windows\env\ 下，
+# 所以往上三级才是仓库根。
 # -----------------------------------------------------------------------------
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
-    $kitDir   = Split-Path -Parent $PSScriptRoot          # ...\spinalhdl-setup-kit
-    $RepoRoot = Split-Path -Parent $kitDir                # ...\(仓库根)
+    $kitDir   = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # ...\spinalhdl-setup-kit
+    $RepoRoot = Split-Path -Parent $kitDir                              # ...\(仓库根)
 }
-$ScriptsDir = Join-Path $PSScriptRoot '..\scripts'
+$ScriptsDir = Join-Path $kitDir 'scripts'
 $SrcAxi     = Join-Path $RepoRoot 'AXIcrossbar'
 $SrcApb     = Join-Path $RepoRoot 'apb'
 
@@ -198,19 +199,45 @@ if (Test-Path (Join-Path $RepoRoot 'spinalhdl-setup-kit')) {
 } else {
     Bad "在仓库根下找不到 spinalhdl-setup-kit\ —— 目录结构可能被改动过"
 }
-if (Test-Path (Join-Path $ScriptsDir '01-install-toolchain.sh')) {
-    Ok "WSL 侧脚本存在：$ScriptsDir"
+$needScripts = @(
+    'env\01-install-toolchain.sh',
+    'env\02-vscode-extensions.sh',
+    'axi\10-create-bus-project.sh', 'axi\11-make-bus-verilog.sh',
+    'axi\12-create-sim-project.sh', 'axi\13-make-model-verilog.sh',
+    'apb\20-create-bus-project.sh', 'apb\21-make-bus-verilog.sh',
+    'apb\22-create-sim-project.sh', 'apb\23-make-model-verilog.sh'
+)
+$missScripts = @($needScripts | Where-Object { -not (Test-Path (Join-Path $ScriptsDir $_)) })
+if ($missScripts.Count -eq 0) {
+    Ok "WSL 侧脚本齐全：$ScriptsDir （共 $($needScripts.Count) 个）"
 } else {
-    Warn "在 $ScriptsDir 下找不到 01-install-toolchain.sh"
+    Bad "缺少脚本：$($missScripts -join ', ')"
 }
 
-$needAxi = @('Axicrossbar.scala', 'fifo.scala', 'Config.scala')
-$needApb = @('Apbcrossbar.scala', 'ApbSim.scala', 'Config.scala')
+$needWin = @('axi\14-run-sim.cmd', 'axi\14-run-sim.tcl', 'axi\14-wave.tcl',
+             'apb\24-run-sim.cmd', 'apb\24-run-sim.tcl', 'apb\24-wave.tcl')
+$winDir = Split-Path -Parent $PSScriptRoot
+$missWin = @($needWin | Where-Object { -not (Test-Path (Join-Path $winDir $_)) })
+if ($missWin.Count -eq 0) {
+    Ok "Windows 侧仿真脚本齐全：$winDir"
+} else {
+    Bad "缺少 Windows 侧脚本：$($missWin -join ', ')"
+}
+
+# 每条总线的「源码 + 已生成的 Verilog 产物」
+$needAxi = @('Axicrossbar.scala', 'fifo.scala', 'Config.scala', 'sim\AxiModels.scala')
+$needApb = @('Apbcrossbar.scala', 'Config.scala', 'sim\ApbModels.scala')
 
 if (Test-Path $SrcAxi) {
     $miss = @($needAxi | Where-Object { -not (Test-Path (Join-Path $SrcAxi $_)) })
     if ($miss.Count -eq 0) { Ok "AXI 源码目录齐全：$SrcAxi  （$($needAxi -join ', ')）" }
     else { Bad "AXI 源码目录 $SrcAxi 缺少：$($miss -join ', ')" }
+    $prodAxi = @('verilog\AxiCrossbar_2x8.v', 'verilog\Axi_CDC.v',
+                 'verification\models\AxiMasterModel.v', 'verification\models\AxiSlaveModel.v',
+                 'verification\tb_axi_top.v')
+    $missP = @($prodAxi | Where-Object { -not (Test-Path (Join-Path $SrcAxi $_)) })
+    if ($missP.Count -eq 0) { Ok "AXI 的 Verilog 产物齐全（RTL / 模型 / TB）" }
+    else { Warn "AXI 还缺：$($missP -join ', ')"; Note "在 WSL 里跑 11 与 13 号脚本即可补齐" }
 } else {
     Bad "找不到 AXI 源码目录：$SrcAxi"
 }
@@ -219,8 +246,42 @@ if (Test-Path $SrcApb) {
     $miss = @($needApb | Where-Object { -not (Test-Path (Join-Path $SrcApb $_)) })
     if ($miss.Count -eq 0) { Ok "APB 源码目录齐全：$SrcApb  （$($needApb -join ', ')）" }
     else { Bad "APB 源码目录 $SrcApb 缺少：$($miss -join ', ')" }
+    $prodApb = @('verilog\Apb3Crossbar_2x8.v',
+                 'verification\models\ApbMasterModel.v', 'verification\models\ApbSlaveModel.v',
+                 'verification\tb_apb_top.v')
+    $missP = @($prodApb | Where-Object { -not (Test-Path (Join-Path $SrcApb $_)) })
+    if ($missP.Count -eq 0) { Ok "APB 的 Verilog 产物齐全（RTL / 模型 / TB）" }
+    else { Warn "APB 还缺：$($missP -join ', ')"; Note "在 WSL 里跑 21 与 23 号脚本即可补齐" }
 } else {
     Bad "找不到 APB 源码目录：$SrcApb"
+}
+
+# -----------------------------------------------------------------------------
+Hdr "7. Vivado（Windows 侧仿真的唯一依赖）"
+$vivadoHits = @()
+if ($env:VIVADO_BIN -and (Test-Path $env:VIVADO_BIN)) {
+    Ok "VIVADO_BIN 已设置：$env:VIVADO_BIN"
+    $vivadoHits += $env:VIVADO_BIN
+}
+foreach ($root in @('C:\AMDDesignTools', 'D:\AMDDesignTools', 'C:\Xilinx', 'D:\Xilinx')) {
+    if (-not (Test-Path $root)) { continue }
+    Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | ForEach-Object {
+            $b = Join-Path $_.FullName 'Vivado\bin\vivado.bat'
+            if (Test-Path $b) { $vivadoHits += $b }
+        }
+}
+$vivadoHits = @($vivadoHits | Select-Object -Unique)
+if ($vivadoHits.Count -eq 0) {
+    Warn "没有找到 vivado.bat"
+    Note "装了 Vivado 但装在别处时，先设环境变量： set VIVADO_BIN=<...>\Vivado\bin\vivado.bat"
+} else {
+    Ok "找到 $($vivadoHits.Count) 个 Vivado："
+    $vivadoHits | ForEach-Object { Note $_ }
+    if ($vivadoHits.Count -gt 1) {
+        Note "14/24 号 .cmd 会按版本号倒序取第一个；若该版本没有 license 会报错，"
+        Note "此时用 set VIVADO_BIN=<有 license 的那个> 覆盖即可。"
+    }
 }
 
 # 换算成 WSL 里的 /mnt/<盘符>/... 形式，方便后面直接粘贴到 Ubuntu 终端
@@ -244,7 +305,7 @@ Note "在 WSL 里对应的仓库根： $wslRepo"
 Note "在 WSL 里对应的套件目录：$wslKit"
 
 # -----------------------------------------------------------------------------
-Hdr "7. 下一步怎么做"
+Hdr "8. 下一步怎么做"
 Write-Host @"
 
     1) 以管理员身份打开 PowerShell，执行：
@@ -259,22 +320,30 @@ Write-Host @"
 
     3) 安装 VS Code，并在 VS Code 里安装扩展：WSL
 
-    4) 把整套文件（含 AXIcrossbar、apb、spinalhdl-setup-kit 三个目录）放在
-       Windows 上任意好记的位置即可 —— 下面的脚本都不写死盘符，
-       全部按「脚本自己所在的位置」推导路径，放在哪都能跑。
+    4) 确认 Vivado 能打开（只用来跑 xsim，不做综合）。若自动挑选的版本没有 license：
+         set VIVADO_BIN=<...>\Vivado\bin\vivado.bat
 
-    5) 打开 Ubuntu 终端，进入 WSL 里的套件目录，然后依次执行：
-         cd "$wslKit"
-         bash scripts/01-install-toolchain.sh
-         bash scripts/02-create-project.sh
-         bash scripts/03-import-source.sh
-         bash scripts/04-doctor.sh
-         bash scripts/05-make-verilog.sh
-         bash scripts/06-vscode-extensions.sh
+    5) 打开 Ubuntu 终端，进入套件目录，按章执行：
 
-    6) 02/03 会在 WSL 里建两个互不相干的工程（这也是脚本要求的）：
-         AXI  ->  ~/spinalhdl-projects/AXIcrossbar
-         APB  ->  ~/spinalhdl-projects/apb
+         第 1 章  环境
+           bash scripts/env/01-install-toolchain.sh
+           bash scripts/env/02-vscode-extensions.sh
+
+         第 2 章  AXI 总线
+           bash scripts/axi/10-create-bus-project.sh
+           bash scripts/axi/11-make-bus-verilog.sh
+           bash scripts/axi/12-create-sim-project.sh
+           bash scripts/axi/13-make-model-verilog.sh
+
+         第 3 章  APB 总线
+           bash scripts/apb/20-create-bus-project.sh
+           bash scripts/apb/21-make-bus-verilog.sh
+           bash scripts/apb/22-create-sim-project.sh
+           bash scripts/apb/23-make-model-verilog.sh
+
+         回到 Windows（第 2.5 / 3.5 节）
+           windows\axi\14-run-sim.cmd   （加 gui 参数则停在波形窗口）
+           windows\apb\24-run-sim.cmd
 
 "@ -ForegroundColor Gray
 
